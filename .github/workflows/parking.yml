@@ -1,3 +1,4 @@
+name: Reservateur de Parking
 on:
   schedule:
     # 23:01 UTC = 00:01 à Paris (Heure d'hiver)
