@@ -1,0 +1,19 @@
+on:
+  schedule:
+    # 23:01 UTC = 00:01 à Paris (Heure d'hiver)
+    - cron: '1 23 * * *' 
+  workflow_dispatch: # Pour tester manuellement
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+      - run: pip install requests
+      - name: Lancer la resa
+        run: python parking.py
+        env:
+          BEEMYFLEX_TOKEN: ${{ secrets.BEEMYFLEX_TOKEN }}
