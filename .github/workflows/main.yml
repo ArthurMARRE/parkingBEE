@@ -1,0 +1,3 @@
+on:
+  schedule:
+    - cron: '1 23 * * *' # 23:01 UTC = 00:01 à Paris
