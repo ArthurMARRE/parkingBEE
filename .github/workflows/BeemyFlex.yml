@@ -1,11 +1,8 @@
 name: Parking BeemyFlex
 on:
   schedule:
-    - cron: '0 16 * * *'   # 16h00 GMT
+    - cron: '0 12 * * *'   # 12h00 GMT
     - cron: '10 16 * * *'  # 16h10 GMT
-    - cron: '15 16 * * *'  # 16h15 GMT
-    - cron: '20 16 * * *'  # 16h20 GMT
-    - cron: '30 16 * * *'  # 16h30 GMT
     - cron: '0 17 * * *'   # 17h00 GMT
   workflow_dispatch: # Pour tester manuellement
 
