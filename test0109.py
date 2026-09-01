@@ -108,28 +108,35 @@ def reserver():
                 continue
 
             essais += 1
-            print(f"[{essais}] {nom(spot)} -> HTTP {r.status_code} : "
-                  f"{r.text[:250]}", flush=True)
 
-            if r.status_code in (401, 403):
+            # L'API renvoie TOUJOURS HTTP 200 : le vrai code est dans le
+            # champ "status" du corps JSON. Un 200 HTTP avec status 500
+            # est un echec.
+            try:
+                corps = r.json()
+                statut = corps.get('status')
+                message = corps.get('message')
+            except ValueError:
+                corps, statut, message = {}, None, r.text[:150]
+
+            print(f"[{essais}] {nom(spot)} -> HTTP {r.status_code} / "
+                  f"status {statut} : {message}", flush=True)
+
+            if r.status_code in (401, 403) or statut in (401, 403):
                 print("Token expire. Arret.", flush=True)
                 return 1
 
-            if "already has a reservation" in r.text:
+            if message and "already has a reservation" in message:
                 print("Tu as deja une place pour cette date.", flush=True)
                 return 0
 
-            if r.status_code in (200, 201, 202):
-                # Un 200 ne prouve rien : on relit GetTimeValues pour
-                # verifier que la place est bien passee a notre nom.
-                time.sleep(1.5)
-                encore_libres = etat_des_places(session, jour) or []
-                if spot not in encore_libres:
-                    print(f"CONFIRME : {nom(spot)} reservee pour "
-                          f"{cible.strftime('%d/%m/%Y')}.", flush=True)
-                    return 0
-                print(f"HTTP {r.status_code} mais {nom(spot)} toujours libre "
-                      "-> faux succes, on continue.", flush=True)
+            # Succes uniquement si status 200/201 ET un objet retourne.
+            if statut in (200, 201) and corps.get('singleResult'):
+                print(f"RESERVE : {nom(spot)} pour "
+                      f"{cible.strftime('%d/%m/%Y')} "
+                      f"(reservation #{corps['singleResult'].get('id')}).",
+                      flush=True)
+                return 0
 
         time.sleep(0.4)
 
