@@ -1,247 +1,87 @@
-#!/usr/bin/env python3
-"""
-Réservation automatique d'une place de parking BeeMyFlex.
-
-L'heure cible et le décalage de date sont passés par variables
-d'environnement, ce qui permet d'utiliser le même script pour
-plusieurs crons.
-
-Variables attendues :
-    BEEMYFLEX_TOKEN   (obligatoire) JWT ou token d'API
-    TARGET_TIME_UTC   heure d'ouverture, format HH:MM      (défaut 17:00)
-    DAYS_AHEAD        décalage en jours de la date visée   (défaut 2)
-    SNIPE_SECONDS     durée du bombardement en secondes    (défaut 30)
-    USER_ID           identifiant BeeMyFlex                (défaut 5553)
-
-Code de sortie : 0 si une place est obtenue (ou déjà détenue), 1 sinon.
-"""
-
 import os
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 import requests
 
-API = "https://api.beemyflex.com/api"
-BACKUP_SPOTS = [41, 40, 39, 38]
-HTTP_TIMEOUT = 5  # secondes, par requête
+TOKEN = os.getenv('BEEMYFLEX_TOKEN')
+USER_ID = 5553
+DAYS_AHEAD = 2          # J+2 : à passer à 1 si l'ouverture concerne demain
+TIMEOUT = 5             # sans ça, une requête qui pend bloque toute la fenêtre
 
-# Plafond d'attente : le cron le plus large démarre 1h30 avant la cible.
-# Au-delà, on considère que la config est erronée et on s'arrête.
-MAX_WAIT_SECONDS = 105 * 60
-
-
-def log(msg):
-    """Print immédiat : les logs GitHub Actions sont bufferisés sinon."""
-    print(msg, flush=True)
-
-
-def env_int(name, default):
-    try:
-        return int(os.getenv(name, default))
-    except ValueError:
-        log(f"⚠️  {name} illisible, valeur par défaut {default} utilisée.")
-        return default
-
-
-def build_session(token):
-    s = requests.Session()
-    s.headers.update({
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-        ),
-    })
-    return s
-
-
-def check_auth(session):
-    """Vérifie le token AVANT la fenêtre de tir.
-
-    Sans ça, un token expiré produit 30 secondes de 401 puis un message
-    'pas de place' totalement trompeur.
-    """
-    try:
-        r = session.get(f"{API}/ResourceValues", timeout=HTTP_TIMEOUT)
-    except requests.RequestException as e:
-        log(f"❌ API injoignable pendant la vérification du token : {e}")
-        return None
-
-    if r.status_code in (401, 403):
-        log("❌ TOKEN EXPIRÉ OU INVALIDE. Régénère BEEMYFLEX_TOKEN "
-            "dans les secrets du dépôt. Aucune tentative ne sera faite.")
-        return None
-
-    if not r.ok:
-        log(f"⚠️  ResourceValues a répondu {r.status_code}. "
-            "On continuera avec la liste de secours.")
-        return []
-
-    try:
-        data = r.json()
-    except ValueError:
-        log("⚠️  Réponse non-JSON sur ResourceValues, liste de secours.")
-        return []
-
-    if not isinstance(data, list):
-        log("⚠️  Format inattendu sur ResourceValues, liste de secours.")
-        return []
-
-    # NOTE : à ajuster une fois la structure réelle connue. Le filtre évite
-    # de tenter de réserver des bureaux ou des salles de réunion.
-    spots = [
-        r_["id"] for r_ in data
-        if isinstance(r_, dict) and r_.get("id")
-        and "parking" in str(r_.get("resourceName", r_.get("name", ""))).lower()
-    ]
-
-    if not spots:
-        spots = [r_["id"] for r_ in data if isinstance(r_, dict) and r_.get("id")]
-        log("ℹ️  Aucun filtre 'parking' n'a matché, toutes les ressources "
-            "seront tentées.")
-
-    log(f"✔️  Token valide. {len(spots)} ressource(s) candidate(s) : {spots}")
-    return spots
-
-
-def wait_until(target_hour, target_minute):
-    """Attend l'heure cible UTC avec une précision sub-seconde.
-
-    Sommeil grossier tant qu'on est loin, puis affinage sur la dernière
-    seconde pour taper au plus près de l'ouverture.
-    """
-    now = datetime.now(timezone.utc)
-    target = now.replace(hour=target_hour, minute=target_minute,
-                         second=0, microsecond=0)
-
-    if target < now:
-        delay = (now - target).total_seconds()
-        if delay > 900:
-            log(f"⚠️  Cible dépassée de {int(delay // 60)} min "
-                "(runner GitHub en retard). Tentative immédiate.")
-        else:
-            log(f"ℹ️  Cible dépassée de {delay:.0f}s. Tentative immédiate.")
-        return
-
-    total = (target - now).total_seconds()
-    if total > MAX_WAIT_SECONDS:
-        log(f"❌ Cible dans {total / 60:.0f} min — au-delà du plafond de "
-            f"{MAX_WAIT_SECONDS // 60} min. Vérifie TARGET_TIME_UTC et le "
-            "cron. Arrêt pour ne pas brûler des minutes de runner.")
-        sys.exit(1)
-
-    log(f"⏳ Attente de {total:.1f}s jusqu'à "
-        f"{target_hour:02d}:{target_minute:02d}:00 UTC...")
-
-    while True:
-        remaining = (target - datetime.now(timezone.utc)).total_seconds()
-        if remaining <= 0:
-            break
-        time.sleep(min(remaining, 0.05) if remaining < 2 else 0.5)
-
-
-def try_reserve(session, spot_id, user_id, target_date):
-    payload = {
-        "reservationInfo": 0,
-        "resourceValueId": spot_id,
-        "userId": user_id,
-        "startTime": target_date,
-        "endTime": target_date,
-        "eventRecipients": None,
-        "nbParticipants": 1,
-    }
-    try:
-        return session.post(f"{API}/Reservations/async", json=payload,
-                            timeout=HTTP_TIMEOUT)
-    except requests.RequestException as e:
-        log(f"   ...place {spot_id} : erreur réseau ({type(e).__name__})")
-        return None
+HEADERS = {
+    'Authorization': f'Bearer {TOKEN}',
+    'Content-Type': 'application/json',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+}
 
 
 def reserver_parking():
-    token = os.getenv("BEEMYFLEX_TOKEN")
-    if not token:
-        log("❌ BEEMYFLEX_TOKEN absent de l'environnement.")
+    if not TOKEN:
+        print("❌ BEEMYFLEX_TOKEN absent.", flush=True)
         return 1
 
-    user_id = env_int("USER_ID", 5553)
-    days_ahead = env_int("DAYS_AHEAD", 2)
-    snipe_seconds = env_int("SNIPE_SECONDS", 30)
-
-    raw_time = os.getenv("TARGET_TIME_UTC", "17:00")
-    try:
-        t_hour, t_minute = (int(x) for x in raw_time.split(":"))
-    except ValueError:
-        log(f"❌ TARGET_TIME_UTC='{raw_time}' invalide, format attendu HH:MM.")
-        return 1
-
-    session = build_session(token)
-
-    # 1. Auth + liste des places, AVANT la fenêtre de tir.
-    spots = check_auth(session)
-    if spots is None:
-        return 1
-    if not spots:
-        spots = BACKUP_SPOTS
-        log(f"ℹ️  Liste de secours utilisée : {spots}")
-
-    # 2. Date visée, calculée en UTC comme le reste du script.
-    target_day = datetime.now(timezone.utc) + timedelta(days=days_ahead)
+    target_day = datetime.utcnow() + timedelta(days=DAYS_AHEAD)
     target_date = target_day.strftime("%Y-%m-%dT00:00:00.000Z")
-    log(f"🎯 Cible : {target_day.strftime('%A %d %B %Y')} "
-        f"(J+{days_ahead}) → {target_date}")
+    print(f"🎯 Cible : {target_day.strftime('%d/%m/%Y')}", flush=True)
 
-    # 3. Attente précise.
-    wait_until(t_hour, t_minute)
-    log("🚀 Ouverture ! Lancement des tentatives.")
+    # --- ÉTAPE 1 : RÉCUPÉRER LES PLACES (avant l'attente) ---
+    # Fait maintenant plutôt qu'à 17h : ça teste le token en amont et
+    # évite de perdre une seconde au moment de l'ouverture.
+    try:
+        res = requests.get('https://api.beemyflex.com/api/ResourceValues',
+                           headers=HEADERS, timeout=TIMEOUT)
+        if res.status_code in (401, 403):
+            print("❌ TOKEN EXPIRÉ. Régénère le secret BEEMYFLEX_TOKEN.", flush=True)
+            return 1
+        resource_ids = [r['id'] for r in res.json() if r.get('id')]
+        print(f"✔️  Places : {resource_ids}", flush=True)
+    except Exception as e:
+        resource_ids = [41, 40, 39, 38]
+        print(f"⚠️  ResourceValues KO ({e}) → liste de secours.", flush=True)
 
-    # 4. Bombardement borné.
-    deadline = time.time() + snipe_seconds
-    attempts = 0
+    # --- ÉTAPE 2 : FAIRE LE GUET JUSQU'À 17:00:00 GMT ---
+    print("Mise en attente jusqu'à 17:00:00 GMT...", flush=True)
+    while datetime.utcnow().hour < 17:
+        time.sleep(0.5)
+    print("🚀 17:00:00 GMT ! Lancement de l'offensive.", flush=True)
 
-    while time.time() < deadline:
-        for spot_id in spots:
-            if time.time() >= deadline:
-                break
-
-            r = try_reserve(session, spot_id, user_id, target_date)
-            attempts += 1
-            if r is None:
+    # --- ÉTAPE 3 : LE MODE SNIPER (30 SECONDES) ---
+    start = time.time()
+    while time.time() - start < 30:
+        for spot_id in resource_ids:
+            json_data = {
+                'reservationInfo': 0,
+                'resourceValueId': spot_id,
+                'userId': USER_ID,
+                'startTime': target_date,
+                'endTime': target_date,
+                'eventRecipients': None,
+                'nbParticipants': 1,
+            }
+            try:
+                r = requests.post('https://api.beemyflex.com/api/Reservations/async',
+                                  headers=HEADERS, json=json_data, timeout=TIMEOUT)
+            except requests.RequestException:
                 continue
 
             if r.status_code in (200, 201, 202):
-                log(f"✅ SUCCÈS — place {spot_id} réservée pour "
-                    f"{target_day.strftime('%d/%m/%Y')} "
-                    f"(HTTP {r.status_code}, {attempts} tentative(s)).")
-                if r.status_code == 202:
-                    log("   ⚠️  202 = accepté pour traitement asynchrone. "
-                        "Confirme dans l'appli que la résa est bien passée.")
+                print(f"✅ SUCCÈS ! Place {spot_id} réservée.", flush=True)
                 return 0
 
-            body = r.text.lower()
-
-            if "already has a reservation" in body:
-                log(f"ℹ️  Tu as déjà une place pour "
-                    f"{target_day.strftime('%d/%m/%Y')}. Rien à faire.")
+            if "already has a reservation" in r.text:
+                print("ℹ️ Tu as déjà une place.", flush=True)
                 return 0
 
             if r.status_code in (401, 403):
-                log("❌ 401/403 en pleine fenêtre — le token a expiré "
-                    "entre-temps. Arrêt.")
+                print("❌ Token expiré en pleine fenêtre. Arrêt.", flush=True)
                 return 1
 
-            if r.status_code == 429:
-                log("   ...429 (rate limit), pause de 2s.")
-                time.sleep(2)
-                break
+        print("... toujours rien, on recommence...", flush=True)
+        time.sleep(0.5)
 
-        time.sleep(0.4)
-
-    log(f"❌ Fin du temps imparti ({snipe_seconds}s, {attempts} tentatives). "
-        "Aucune place obtenue.")
+    print("❌ Fin du temps imparti. Pas de place trouvée.", flush=True)
     return 1
 
 
