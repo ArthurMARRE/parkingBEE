@@ -1,0 +1,44 @@
+name: Parking BeemyFlex
+
+# Les guillemets autour de "on" évitent que l'éditeur YAML le convertisse
+# en booléen (on -> true, off -> false), ce qui supprime les déclencheurs.
+"on":
+  schedule:
+    # Les trois visent 17:00 UTC : le script attend l'heure exacte quel
+    # que soit son moment de démarrage. Redondance au cas où GitHub
+    # annule ou retarde une exécution planifiée.
+    - cron: '30 15 * * *'   # filet large, 1h30 avant
+    - cron: '45 16 * * *'   # filet intermédiaire
+    - cron: '56 16 * * *'   # tir principal
+  workflow_dispatch:
+    inputs:
+      target_hour:
+        description: 'Heure cible UTC (0-23) — baisser pour tester'
+        required: false
+        default: '17'
+      days_ahead:
+        description: 'Décalage en jours de la date visée'
+        required: false
+        default: '2'
+
+jobs:
+  reserver:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120   # couvre l'attente de 1h30 + marge
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - run: pip install requests
+
+      - name: Lancer la resa
+        run: python parking.py
+        env:
+          PYTHONUNBUFFERED: '1'
+          BEEMYFLEX_TOKEN: ${{ secrets.BEEMYFLEX_TOKEN }}
+          TARGET_HOUR: ${{ inputs.target_hour || '17' }}
+          DAYS_AHEAD: ${{ inputs.days_ahead || '2' }}
