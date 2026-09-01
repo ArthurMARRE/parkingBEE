@@ -5,100 +5,137 @@ from datetime import datetime, timedelta
 
 import requests
 
+API = 'https://api.beemyflex.com/api'
 TOKEN = os.getenv('BEEMYFLEX_TOKEN')
 USER_ID = 5553
+RESOURCE_ID = 13                                  # Parking CFC
 DAYS_AHEAD = int(os.getenv('DAYS_AHEAD', 2))
 TARGET_HOUR = int(os.getenv('TARGET_HOUR', 17))   # 17 UTC = 18h Casablanca
 TIMEOUT = 5
 
-HEADERS = {
-    'Authorization': f'Bearer {TOKEN}',
-    'Content-Type': 'application/json',
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+# resourceValueId (id technique) -> nom affiche. L'id n'est PAS le numero
+# de place : "Place 175" a l'id 150.
+PLACES = {
+    150: "Place 175", 77: "Place 174", 41: "Place 261", 40: "Place 260",
+    39: "Place 259", 66: "Place 262", 38: "Place 235 (large)",
+    37: "Place 234", 36: "Place 233 (large)", 35: "Place 232",
+    34: "Place 231", 33: "Place 230",
 }
 
+# Ordre de preference : la 175 d'abord, puis les larges, puis le reste.
+SPOT_IDS = [int(x) for x in os.getenv(
+    'SPOT_IDS', '150,38,36,77,41,40,39,66,37,35,34,33').split(',')]
 
-def reserver_parking():
+
+def nom(spot_id):
+    return PLACES.get(spot_id, f"id {spot_id}")
+
+
+def etat_des_places(session, jour):
+    """Lit GetTimeValues et renvoie les ids libres pour le jour vise."""
+    try:
+        r = session.get(f"{API}/ResourceValues/GetTimeValues",
+                        params={'date': jour, 'resourceId': RESOURCE_ID},
+                        timeout=TIMEOUT)
+        if r.status_code in (401, 403):
+            return None
+        data = r.json().get('multipleResult') or []
+    except Exception as e:
+        print(f"GetTimeValues KO ({e}) - on tente quand meme.", flush=True)
+        return []
+
+    libres = []
+    for place in data:
+        pris = any(b.get('startTime', '').startswith(jour)
+                   for b in (place.get('bookings') or []))
+        if not pris:
+            libres.append(place['id'])
+    return libres
+
+
+def reserver():
     if not TOKEN:
         print("BEEMYFLEX_TOKEN absent.", flush=True)
         return 1
 
-    target_day = datetime.utcnow() + timedelta(days=DAYS_AHEAD)
-    target_date = target_day.strftime("%Y-%m-%dT00:00:00.000Z")
-    print(f"Cible : {target_day.strftime('%d/%m/%Y')} (J+{DAYS_AHEAD})", flush=True)
+    session = requests.Session()
+    session.headers.update({
+        'Authorization': f'Bearer {TOKEN}',
+        'Content-Type': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    })
 
-    # --- ETAPE 1 : RECUPERER LES PLACES (avant l'attente) ---
-    # Fait maintenant plutot qu'a 17h : teste le token en amont et evite
-    # de perdre du temps au moment de l'ouverture.
-    try:
-        res = requests.get('https://api.beemyflex.com/api/ResourceValues',
-                           headers=HEADERS, timeout=TIMEOUT)
-        if res.status_code in (401, 403):
-            print("TOKEN EXPIRE OU INVALIDE. Regenere le secret BEEMYFLEX_TOKEN.",
-                  flush=True)
-            return 1
-        resource_ids = [r['id'] for r in res.json() if r.get('id')]
-        print(f"Token OK. Places : {resource_ids}", flush=True)
-    except Exception as e:
-        resource_ids = [41, 40, 39, 38]
-        print(f"ResourceValues KO ({e}) -> liste de secours : {resource_ids}",
+    cible = datetime.utcnow() + timedelta(days=DAYS_AHEAD)
+    jour = cible.strftime("%Y-%m-%d")
+    # Format confirme par l'API : pas de Z, pas de millisecondes.
+    horaire = f"{jour}T00:00:00"
+    print(f"Cible : {cible.strftime('%d/%m/%Y')} (J+{DAYS_AHEAD})", flush=True)
+    print(f"Priorites : {[nom(s) for s in SPOT_IDS[:3]]}...", flush=True)
+
+    libres = etat_des_places(session, jour)
+    if libres is None:
+        print("TOKEN EXPIRE. Regenere le secret BEEMYFLEX_TOKEN.", flush=True)
+        return 1
+    if libres:
+        print(f"Libres avant ouverture : {[nom(s) for s in libres]}", flush=True)
+    else:
+        print("Aucune place libre pour l'instant (normal avant l'ouverture).",
               flush=True)
 
-    # --- ETAPE 2 : FAIRE LE GUET ---
-    print(f"Mise en attente jusqu'a {TARGET_HOUR:02d}:00:00 UTC...", flush=True)
+    print(f"Attente jusqu'a {TARGET_HOUR:02d}:00:00 UTC...", flush=True)
     while datetime.utcnow().hour < TARGET_HOUR:
         time.sleep(0.5)
-    print(f"{TARGET_HOUR:02d}:00 UTC atteint ! Lancement de l'offensive.", flush=True)
+    print("Ouverture. Lancement.", flush=True)
 
-    # --- ETAPE 3 : MODE SNIPER (30 SECONDES) ---
-    start = time.time()
-    tentatives = 0
-    while time.time() - start < 30:
-        for spot_id in resource_ids:
-            json_data = {
+    debut = time.time()
+    essais = 0
+    while time.time() - debut < 30:
+        for spot in SPOT_IDS:
+            payload = {
                 'reservationInfo': 0,
-                'resourceValueId': spot_id,
+                'resourceValueId': spot,
                 'userId': USER_ID,
-                'startTime': target_date,
-                'endTime': target_date,
+                'startTime': horaire,
+                'endTime': horaire,
                 'eventRecipients': None,
                 'nbParticipants': 1,
             }
             try:
-                r = requests.post('https://api.beemyflex.com/api/Reservations/async',
-                                  headers=HEADERS, json=json_data, timeout=TIMEOUT)
-            except requests.RequestException:
+                r = session.post(f"{API}/Reservations/async", json=payload,
+                                 timeout=TIMEOUT)
+            except requests.RequestException as e:
+                print(f"Reseau : {e}", flush=True)
                 continue
 
-            tentatives += 1
+            essais += 1
+            print(f"[{essais}] {nom(spot)} -> HTTP {r.status_code} : "
+                  f"{r.text[:250]}", flush=True)
 
-            if r.status_code in (200, 201, 202):
-                print(f"SUCCES ! Place {spot_id} reservee pour "
-                      f"{target_day.strftime('%d/%m/%Y')} (HTTP {r.status_code}).",
-                      flush=True)
-                return 0
+            if r.status_code in (401, 403):
+                print("Token expire. Arret.", flush=True)
+                return 1
 
             if "already has a reservation" in r.text:
                 print("Tu as deja une place pour cette date.", flush=True)
                 return 0
 
-            if r.status_code in (401, 403):
-                print("401/403 en pleine fenetre : token expire. Arret.", flush=True)
-                return 1
+            if r.status_code in (200, 201, 202):
+                # Un 200 ne prouve rien : on relit GetTimeValues pour
+                # verifier que la place est bien passee a notre nom.
+                time.sleep(1.5)
+                encore_libres = etat_des_places(session, jour) or []
+                if spot not in encore_libres:
+                    print(f"CONFIRME : {nom(spot)} reservee pour "
+                          f"{cible.strftime('%d/%m/%Y')}.", flush=True)
+                    return 0
+                print(f"HTTP {r.status_code} mais {nom(spot)} toujours libre "
+                      "-> faux succes, on continue.", flush=True)
 
-            # Premiere reponse d'echec : on montre ce que dit le serveur,
-            # sinon on ne sait pas pourquoi ca rate.
-            if tentatives == 1:
-                print(f"Reponse serveur (place {spot_id}) : "
-                      f"HTTP {r.status_code} - {r.text[:300]}", flush=True)
+        time.sleep(0.4)
 
-        print("... toujours rien, on recommence le tour des places...", flush=True)
-        time.sleep(0.5)
-
-    print(f"Fin du temps imparti ({tentatives} tentatives). Pas de place trouvee.",
-          flush=True)
+    print(f"Fin du temps imparti ({essais} tentatives). Rien obtenu.", flush=True)
     return 1
 
 
 if __name__ == "__main__":
-    sys.exit(reserver_parking())
+    sys.exit(reserver())
