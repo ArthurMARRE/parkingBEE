@@ -7,8 +7,9 @@ import requests
 
 TOKEN = os.getenv('BEEMYFLEX_TOKEN')
 USER_ID = 5553
-DAYS_AHEAD = 2          # J+2 : à passer à 1 si l'ouverture concerne demain
-TIMEOUT = 5             # sans ça, une requête qui pend bloque toute la fenêtre
+DAYS_AHEAD = int(os.getenv('DAYS_AHEAD', 2))
+TARGET_HOUR = int(os.getenv('TARGET_HOUR', 17))   # 17 UTC = 18h Casablanca
+TIMEOUT = 5
 
 HEADERS = {
     'Authorization': f'Bearer {TOKEN}',
@@ -19,36 +20,39 @@ HEADERS = {
 
 def reserver_parking():
     if not TOKEN:
-        print("❌ BEEMYFLEX_TOKEN absent.", flush=True)
+        print("BEEMYFLEX_TOKEN absent.", flush=True)
         return 1
 
     target_day = datetime.utcnow() + timedelta(days=DAYS_AHEAD)
     target_date = target_day.strftime("%Y-%m-%dT00:00:00.000Z")
-    print(f"🎯 Cible : {target_day.strftime('%d/%m/%Y')}", flush=True)
+    print(f"Cible : {target_day.strftime('%d/%m/%Y')} (J+{DAYS_AHEAD})", flush=True)
 
-    # --- ÉTAPE 1 : RÉCUPÉRER LES PLACES (avant l'attente) ---
-    # Fait maintenant plutôt qu'à 17h : ça teste le token en amont et
-    # évite de perdre une seconde au moment de l'ouverture.
+    # --- ETAPE 1 : RECUPERER LES PLACES (avant l'attente) ---
+    # Fait maintenant plutot qu'a 17h : teste le token en amont et evite
+    # de perdre du temps au moment de l'ouverture.
     try:
         res = requests.get('https://api.beemyflex.com/api/ResourceValues',
                            headers=HEADERS, timeout=TIMEOUT)
         if res.status_code in (401, 403):
-            print("❌ TOKEN EXPIRÉ. Régénère le secret BEEMYFLEX_TOKEN.", flush=True)
+            print("TOKEN EXPIRE OU INVALIDE. Regenere le secret BEEMYFLEX_TOKEN.",
+                  flush=True)
             return 1
         resource_ids = [r['id'] for r in res.json() if r.get('id')]
-        print(f"✔️  Places : {resource_ids}", flush=True)
+        print(f"Token OK. Places : {resource_ids}", flush=True)
     except Exception as e:
         resource_ids = [41, 40, 39, 38]
-        print(f"⚠️  ResourceValues KO ({e}) → liste de secours.", flush=True)
+        print(f"ResourceValues KO ({e}) -> liste de secours : {resource_ids}",
+              flush=True)
 
-    # --- ÉTAPE 2 : FAIRE LE GUET JUSQU'À 17:00:00 GMT ---
-    print("Mise en attente jusqu'à 17:00:00 GMT...", flush=True)
-    while datetime.utcnow().hour < 17:
+    # --- ETAPE 2 : FAIRE LE GUET ---
+    print(f"Mise en attente jusqu'a {TARGET_HOUR:02d}:00:00 UTC...", flush=True)
+    while datetime.utcnow().hour < TARGET_HOUR:
         time.sleep(0.5)
-    print("🚀 17:00:00 GMT ! Lancement de l'offensive.", flush=True)
+    print(f"{TARGET_HOUR:02d}:00 UTC atteint ! Lancement de l'offensive.", flush=True)
 
-    # --- ÉTAPE 3 : LE MODE SNIPER (30 SECONDES) ---
+    # --- ETAPE 3 : MODE SNIPER (30 SECONDES) ---
     start = time.time()
+    tentatives = 0
     while time.time() - start < 30:
         for spot_id in resource_ids:
             json_data = {
@@ -66,22 +70,33 @@ def reserver_parking():
             except requests.RequestException:
                 continue
 
+            tentatives += 1
+
             if r.status_code in (200, 201, 202):
-                print(f"✅ SUCCÈS ! Place {spot_id} réservée.", flush=True)
+                print(f"SUCCES ! Place {spot_id} reservee pour "
+                      f"{target_day.strftime('%d/%m/%Y')} (HTTP {r.status_code}).",
+                      flush=True)
                 return 0
 
             if "already has a reservation" in r.text:
-                print("ℹ️ Tu as déjà une place.", flush=True)
+                print("Tu as deja une place pour cette date.", flush=True)
                 return 0
 
             if r.status_code in (401, 403):
-                print("❌ Token expiré en pleine fenêtre. Arrêt.", flush=True)
+                print("401/403 en pleine fenetre : token expire. Arret.", flush=True)
                 return 1
 
-        print("... toujours rien, on recommence...", flush=True)
+            # Premiere reponse d'echec : on montre ce que dit le serveur,
+            # sinon on ne sait pas pourquoi ca rate.
+            if tentatives == 1:
+                print(f"Reponse serveur (place {spot_id}) : "
+                      f"HTTP {r.status_code} - {r.text[:300]}", flush=True)
+
+        print("... toujours rien, on recommence le tour des places...", flush=True)
         time.sleep(0.5)
 
-    print("❌ Fin du temps imparti. Pas de place trouvée.", flush=True)
+    print(f"Fin du temps imparti ({tentatives} tentatives). Pas de place trouvee.",
+          flush=True)
     return 1
 
 
