@@ -1,5 +1,5 @@
 name: Parking BeemyFlex
-on:
+off:
   schedule:
     - cron: '0 12 * * *'   # 12h00 GMT
     - cron: '10 16 * * *'  # 16h10 GMT
