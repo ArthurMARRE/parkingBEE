@@ -1,4 +1,4 @@
-name: Parking BeemyFlex
+name: Parking BeemyFlex TEST
 
 # Les guillemets autour de "on" évitent que l'éditeur YAML le convertisse
 # en booléen (on -> true, off -> false), ce qui supprime les déclencheurs.
