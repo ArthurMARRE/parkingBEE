@@ -1,6 +1,3 @@
-Code de sortie : 0 si une place est obtenue (ou déjà détenue), 1 sinon.
-"""
-
 import os
 import sys
 import time
