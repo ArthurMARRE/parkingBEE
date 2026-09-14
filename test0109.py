@@ -56,7 +56,7 @@ SYNC_HORLOGE = os.getenv('SYNC_HORLOGE', '1') == '1'
 TIMEOUT = 5
 
 # Numerotation Python : lundi = 0, mardi = 1, mercredi = 2, jeudi = 3...
-JOURS_CIBLES = {int(x) for x in os.getenv('JOURS_CIBLES', '0,1,3').split(',')}
+JOURS_CIBLES = {int(x) for x in os.getenv('JOURS_CIBLES', '0,1,2,3').split(',')}
 NOM_JOUR = ['lundi', 'mardi', 'mercredi', 'jeudi',
             'vendredi', 'samedi', 'dimanche']
 
