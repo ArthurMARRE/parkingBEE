@@ -1,80 +1,58 @@
-name: Parking BeemyFlex TEST
+name: Parking BeemyFlex
 
-# ATTENTION : la cle doit etre "on" entre guillemets, sinon YAML la lit
-# comme le booleen True et GitHub ne voit aucun declencheur.
+# "on" entre guillemets : sinon YAML le lit comme le booleen True et
+# GitHub ne voit aucun declencheur.
 "on":
   workflow_dispatch:
     inputs:
       target_hour:
-        description: "Heure UTC d'ouverture"
-        required: false
+        description: "Heure UTC d'ouverture (baisser pour tester)"
         default: "17"
-      target_minute:
-        description: "Minute UTC d'ouverture"
-        required: false
-        default: "0"
       days_ahead:
         description: "Decalage de la date visee, en jours"
-        required: false
         default: "2"
-      jours_cibles:
-        description: "Jours autorises (lundi=0 ... dimanche=6)"
-        required: false
-        default: "0,1,3"
 
   schedule:
-    # Numerotation cron : dimanche = 0, lundi = 1 ... samedi = 6.
-    # On reserve a J+2, donc pour viser lundi / mardi / jeudi il faut
-    # tourner le samedi (6), le dimanche (0) et le mardi (2).
-    #
-    #   samedi   -> lundi
-    #   dimanche -> mardi
-    #   mardi    -> jeudi
-    #
-    # Trois passages, mais UN SEUL tire a l'ouverture : les deux autres
-    # sont des relais qui se retirent si une place est deja obtenue.
-    - cron: '30 15 * * 0,2,6'   # PRINCIPAL  - tir a 17:00:00 pile
-    - cron: '35 16 * * 0,2,6'   # relais 1   - tir a 17:00:25 si besoin
-    - cron: '48 16 * * 0,2,6'   # relais 2   - tir a 17:00:50 si besoin
+    # A SUPPRIMER APRES LE TEST. Lundi (cron : lundi = 1), 3 fois par
+    # heure. La date visee un lundi est J+2 = mercredi, hors JOURS_CIBLES :
+    # le script sort en 5 secondes sans rien reserver.
+    - cron: '9,29,49 * * * 1'
+
+    # Reservation a J+2 : samedi -> lundi, dimanche -> mardi, mardi -> jeudi.
+    # (cron : dimanche = 0, lundi = 1 ... samedi = 6)
+    # Minutes decalees : les heures rondes et les demies sont les creneaux
+    # les plus charges chez GitHub, donc les plus souvent abandonnes.
+    # Un seul run tire a T+0, les deux autres sont des relais qui se
+    # retirent si une place a deja ete obtenue.
+    - cron: '27 15 * * 0,2,6'   # principal -> 17:00:00
+    - cron: '33 16 * * 0,2,6'   # relais 1  -> 17:00:25
+    - cron: '51 16 * * 0,2,6'   # relais 2  -> 17:00:50
 
 jobs:
   reserver:
     runs-on: ubuntu-latest
-    timeout-minutes: 130      # couvre l'attente de 1h30 + la veille + marge
+    timeout-minutes: 130       # attente de 1h33 + veille + marge
 
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
-      # Fait avant l'attente : ces secondes ne coutent rien tant que le
-      # runner demarre en avance.
-      - name: Dependances
-        run: pip install --disable-pip-version-check --quiet requests
+      - run: pip install --disable-pip-version-check --quiet requests
 
       - name: Lancer la resa
         env:
+          PYTHONUNBUFFERED: '1'
           BEEMYFLEX_TOKEN: ${{ secrets.BEEMYFLEX_TOKEN }}
           TARGET_HOUR: ${{ github.event.inputs.target_hour || '17' }}
-          TARGET_MINUTE: ${{ github.event.inputs.target_minute || '0' }}
           DAYS_AHEAD: ${{ github.event.inputs.days_ahead || '2' }}
-          JOURS_CIBLES: ${{ github.event.inputs.jours_cibles || '0,1,3' }}
 
-          # C'est ce champ qui empeche les doublons : seul le cron de
-          # 15:30 tire a T+0. Les deux autres attendent 25 s et 50 s, et
-          # abandonnent si une place a deja ete obtenue. Un declenchement
-          # manuel vaut PRINCIPAL.
+          # Seule variable vraiment pilotee par le YAML : elle empeche les
+          # doublons. Un declenchement manuel, et le cron de test, valent 0.
           DELAI_SECOURS: >-
-            ${{ (github.event.schedule == '35 16 * * 0,2,6' && '25')
-             || (github.event.schedule == '48 16 * * 0,2,6' && '50')
+            ${{ (github.event.schedule == '33 16 * * 0,2,6' && '25')
+             || (github.event.schedule == '51 16 * * 0,2,6' && '50')
              || '0' }}
-
-          # Ordre de preference : 175 d'abord, puis les larges, puis le reste.
-          SPOT_IDS: '150,38,36,77,41,40,39,66,37,35,34,33'
-          BURST_PRIO: '2.5'
-          SNIPE_SECONDS: '30'
-          VEILLE_SECONDS: '60'
-          SYNC_HORLOGE: '1'
-        run: python test0109.py
+        run: |
+          echo "cron ${{ github.event.schedule || 'manuel' }} / demarrage $(date -u '+%H:%M:%S')Z"
+          python test0109.py
